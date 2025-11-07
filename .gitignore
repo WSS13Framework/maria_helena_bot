@@ -1,0 +1,26 @@
+# Segurança
+.env
+.env.local
+credentials.json
+*.key
+*.pem
+
+# Sistema
+__pycache__/
+*.pyc
+.DS_Store
+.vscode/
+.idea/
+
+# Logs grandes
+logs/
+*.log
+
+# Modelos grandes (upload manual)
+*.h5
+*.pkl
+*.joblib
+
+# Dados sensíveis
+private/
+secrets/
