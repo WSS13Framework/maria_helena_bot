@@ -1,3 +1,32 @@
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-arg-in-pip.log
+
+# IDEs
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Database (se você não quiser versionar o banco de dados)
+maria_helena.sqlite
+
+# Modelos e Scalers (se você quiser versionar apenas o código, mas não os arquivos grandes)
+# Neste caso, você provavelmente QUER versionar o modelo e o scaler, então NÃO os adicione aqui.
+# Se eles forem muito grandes e o GitHub/GitLab reclamar, podemos reconsiderar.
+# maria_helena_lstm_retrained.keras
+# scaler (1).joblib
+
 # Segurança
 .env
 .env.local

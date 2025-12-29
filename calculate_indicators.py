@@ -4,12 +4,13 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 import logging
+import os 
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class IndicatorCalculator:
-    def __init__(self, db_path="/root/.n8n/database.sqlite"):
-        self.db_path = db_path
+    def __init__(self, db_path="~/maria_helena_bot/maria_helena.sqlite"):
+        self.db_path = os.path.expanduser(db_path) 
     
     def calculate_ema(self, data, period=200):
         """Calcula EMA (Exponential Moving Average)"""
@@ -68,15 +69,62 @@ class IndicatorCalculator:
     def update_indicators(self):
         """Atualiza todos os indicadores no banco"""
         try:
-            # Ler dados do banco
             conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Garante que a tabela maria_helena_candles exista antes de tentar ler
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS maria_helena_candles (
+                    openTime INTEGER UNIQUE,
+                    closeTime INTEGER,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume REAL,
+                    ema_200 REAL,
+                    sma_short REAL,
+                    sma_long REAL,
+                    rsi_14 REAL,
+                    atr_14 REAL,
+                    bb_upper REAL,
+                    bb_lower REAL,
+                    macd REAL,
+                    macd_signal REAL,
+                    donchian_high REAL,
+                    donchian_low REAL,
+                    obv REAL
+                )
+            """)
+            conn.commit()
+
+            # --- NOVO BLOCO DE CÓDIGO: Adicionar colunas de indicadores se estiverem faltando ---
+            indicator_columns = [
+                'ema_200', 'sma_short', 'sma_long', 'rsi_14', 'atr_14',
+                'bb_upper', 'bb_lower', 'macd', 'macd_signal',
+                'donchian_high', 'donchian_low', 'obv'
+            ]
+            
+            # Obter as colunas existentes na tabela
+            cursor.execute(f"PRAGMA table_info(maria_helena_candles);")
+            existing_columns_info = cursor.fetchall()
+            existing_column_names = [col[1] for col in existing_columns_info]
+
+            for col_name in indicator_columns:
+                if col_name not in existing_column_names:
+                    logging.info(f"🔧 Adicionando coluna ausente: {col_name} à tabela maria_helena_candles")
+                    cursor.execute(f"ALTER TABLE maria_helena_candles ADD COLUMN {col_name} REAL;")
+            conn.commit()
+            # --- FIM DO NOVO BLOCO ---
+
+            # Ler dados do banco
             df = pd.read_sql_query(
-                "SELECT id, close, high, low, volume FROM maria_helena_candles ORDER BY openTime ASC",
+                "SELECT openTime, close, high, low, volume FROM maria_helena_candles ORDER BY openTime ASC",
                 conn
             )
             
-            if len(df) < 60:
-                logging.warning(f"⚠️ Apenas {len(df)} candles. Precisa de 60+ pra calcular indicadores.")
+            if len(df) < 200:
+                logging.warning(f"⚠️ Apenas {len(df)} candles. Precisa de pelo menos 200 pra calcular todos os indicadores.")
                 conn.close()
                 return False
             
@@ -108,8 +156,6 @@ class IndicatorCalculator:
             df['obv'] = self.calculate_obv(df['close'], df['volume'])
             
             # Atualizar banco
-            cursor = conn.cursor()
-            
             for idx, row in df.iterrows():
                 cursor.execute("""
                     UPDATE maria_helena_candles
@@ -126,7 +172,7 @@ class IndicatorCalculator:
                         donchian_high = ?,
                         donchian_low = ?,
                         obv = ?
-                    WHERE id = ?
+                    WHERE openTime = ?
                 """, (
                     row['ema_200'],
                     row['sma_short'],
@@ -140,7 +186,7 @@ class IndicatorCalculator:
                     row['donchian_high'],
                     row['donchian_low'],
                     row['obv'],
-                    row['id']
+                    row['openTime']
                 ))
             
             conn.commit()
