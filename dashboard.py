@@ -9,6 +9,7 @@ from tensorflow.keras.models import load_model
 from sklearn.preprocessing import MinMaxScaler
 import warnings
 from typing import List, Dict, Optional
+import joblib # Importar a biblioteca joblib
 
 # Configure logging for the dashboard
 logging.basicConfig(level=logging.INFO,
@@ -27,6 +28,7 @@ warnings.filterwarnings('ignore')
 # 
 DB_PATH = os.path.expanduser("~/maria_helena_bot/maria_helena.sqlite")
 MODEL_PATH = os.path.expanduser("~/maria_helena_bot/maria_helena_lstm_integrated_model.h5")
+SCALER_PATH = os.path.expanduser("~/maria_helena_bot/min_max_scaler.joblib") # NOVO: Caminho para o scaler
 REALTIME_UPDATER_LOG_PATH = os.path.expanduser("~/maria_helena_bot/realtime_updater.log") # Path to the updater's log file
 
 FEATURES = ['close', 'high', 'low', 'volume', 'ema_200', 'sma_short', 'sma_long', 
@@ -37,7 +39,7 @@ LOOKBACK = 60 # Number of past candles to consider for prediction
 
 app = Flask(__name__)
 
-# Carregar modelo na inicialização
+# Carregar modelo e scaler na inicialização
 logger.info("🚀 Carregando modelo LSTM...")
 model = None
 try:
@@ -46,6 +48,15 @@ try:
 except Exception as e:
     logger.error(f"❌ Erro ao carregar modelo LSTM de '{MODEL_PATH}': {e}", exc_info=True)
     logger.warning("Predições não estarão disponíveis sem o modelo.")
+
+logger.info("⚙️ Carregando scaler...")
+scaler_obj = None # Renomeado para evitar conflito com 'scaler' local
+try:
+    scaler_obj = joblib.load(SCALER_PATH)
+    logger.info("✅ Scaler carregado!")
+except Exception as e:
+    logger.error(f"❌ Erro ao carregar scaler de '{SCALER_PATH}': {e}", exc_info=True)
+    logger.warning("Predições podem ser inconsistentes sem o scaler correto.")
 
 # 
 # FUNÇÕES DE UTILIDADE (para o log)
@@ -82,6 +93,9 @@ def get_prediction() -> Optional[Dict]:
     if model is None:
         logger.warning("Modelo LSTM não carregado. Não é possível fazer predições.")
         return None
+    if scaler_obj is None: # NOVO: Verificar se o scaler foi carregado
+        logger.warning("Scaler não carregado. Não é possível fazer predições consistentes.")
+        return None
     
     try:
         with sqlite3.connect(DB_PATH) as conn:
@@ -96,20 +110,15 @@ def get_prediction() -> Optional[Dict]:
         df = df.iloc[::-1].reset_index(drop=True)
         df_clean = df.dropna(subset=FEATURES)
 
-        if len(df_clean) < LOOKBACK: # CORRIGIDO
-            logger.warning(f"Não há dados suficientes ({len(df_clean)} < {LOOKBACK}) no DB para predição.") # CORRIGIDO
+        if len(df_clean) < LOOKBACK:
+            logger.warning(f"Não há dados suficientes ({len(df_clean)} < {LOOKBACK}) no DB para predição.")
             return None
         
         # Preparar dados para a predição
         last_data = df_clean.tail(LOOKBACK)[FEATURES].values
         
-        # Escalar os dados. Idealmente, o scaler seria pré-treinado com o mesmo dataset do modelo.
-        # Por simplicidade, escalamos com base nos dados mais recentes.
-        all_data_for_scaler = df_clean[FEATURES].values
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        scaler.fit(all_data_for_scaler)
-        
-        last_data_scaled = scaler.transform(last_data)
+        # NOVO: Usar o scaler_obj carregado globalmente para transformar os dados
+        last_data_scaled = scaler_obj.transform(last_data)
         X_pred = np.reshape(last_data_scaled, (1, LOOKBACK, len(FEATURES)))
         
         # Fazer predição
@@ -119,7 +128,7 @@ def get_prediction() -> Optional[Dict]:
         dummy_features = np.zeros((1, len(FEATURES)))
         close_index = FEATURES.index('close')
         dummy_features[0, close_index] = prediction_scaled[0, 0]
-        prediction_unscaled = scaler.inverse_transform(dummy_features)
+        prediction_unscaled = scaler_obj.inverse_transform(dummy_features) # NOVO: Usar scaler_obj para inverse_transform
         predicted_price = prediction_unscaled[0, close_index]
         
         # Dados atuais e cálculo de sinal
@@ -130,15 +139,21 @@ def get_prediction() -> Optional[Dict]:
         signal = "HOLD"
         confidence_score = 50.0 # Default para HOLD
         
+        # Extrair os valores mais recentes dos indicadores para a lógica de insights
+        latest_rsi = df_clean['rsi_14'].iloc[-1]
+        latest_macd = df_clean['macd'].iloc[-1]
+        latest_ema_200 = df_clean['ema_200'].iloc[-1]
+        latest_macd_signal = df_clean['macd_signal'].iloc[-1] 
+
         if change_pct > 0.5:
             signal = "BUY"
             if change_pct > 2:
                 confidence_score = min(95.0, 75.0 + (change_pct - 2) * 5) # Alta confiança
             else:
                 confidence_score = min(70.0, 50.0 + (change_pct - 0.5) * 10) # Média confiança
-        elif change_pct < -0.5: # CORRIGIDO
+        elif change_pct < -0.5:
             signal = "SELL"
-            if change_pct < -2: # CORRIGIDO
+            if change_pct < -2:
                 confidence_score = min(95.0, 75.0 + (abs(change_pct) - 2) * 5) # Alta confiança
             else:
                 confidence_score = min(70.0, 50.0 + (abs(change_pct) - 0.5) * 10) # Média confiança
@@ -151,35 +166,35 @@ def get_prediction() -> Optional[Dict]:
         # Lógica para mensagem de insight e razões
         if signal == "BUY":
             insight_message = "Forte momentum de alta detectado com condições técnicas favoráveis."
-            if rsi < 70: # Não sobrecomprado # CORRIGIDO
+            if latest_rsi < 70:
                 insight_reasons.append("RSI indica espaço para movimento de alta.")
-            if macd > 0 and macd > df_clean['macd_signal'].iloc[-1]:
+            if latest_macd > 0 and latest_macd > latest_macd_signal:
                 insight_reasons.append("MACD mostra cruzamento de alta e momentum positivo.")
-            if current_price > ema_200:
+            if current_price > latest_ema_200:
                 insight_reasons.append("Preço acima da EMA 200, confirmando tendência de alta.")
             if change_pct > 2:
                 insight_reasons.append("Mudança significativa de preço para cima prevista.")
                 
         elif signal == "SELL":
             insight_message = "Pressão de baixa aumentando, observar movimento de queda."
-            if rsi > 30: # Não sobrevendido
+            if latest_rsi > 30:
                 insight_reasons.append("RSI indica espaço para movimento de baixa.")
-            if macd < 0 and macd < df_clean['macd_signal'].iloc[-1]: # Cruzamento de baixa do MACD # CORRIGIDO
+            if latest_macd < 0 and latest_macd < latest_macd_signal:
                 insight_reasons.append("MACD mostra cruzamento de baixa e momentum negativo.")
-            if current_price < ema_200: # CORRIGIDO
+            if current_price < latest_ema_200:
                 insight_reasons.append("Preço abaixo da EMA 200, confirmando tendência de baixa.")
-            if change_pct < -2: # CORRIGIDO
+            if change_pct < -2:
                 insight_reasons.append("Mudança significativa de preço para baixo prevista.")
         else: # HOLD
-            if abs(change_pct) < 0.2: # CORRIGIDO
+            if abs(change_pct) < 0.2:
                 insight_message = "Ação de preço consolidando, aguardando sinais mais claros."
             else:
                 insight_message = "Sentimento de mercado neutro, potencial para movimento lateral."
-            if rsi >= 40 and rsi <= 60: # RSI neutro
+            if latest_rsi >= 40 and latest_rsi <= 60:
                 insight_reasons.append("RSI em território neutro, indicando forças equilibradas.")
-            if abs(macd) < 0.1: # MACD próximo de zero # CORRIGIDO
+            if abs(latest_macd) < 0.1:
                 insight_reasons.append("MACD próximo de zero, sugerindo falta de forte momentum.")
-            if abs(current_price - ema_200) / current_price < 0.005: # Preço próximo da EMA 200 # CORRIGIDO
+            if abs(current_price - latest_ema_200) / current_price < 0.005:
                 insight_reasons.append("Preço consolidando em torno da EMA 200, indicando indecisão.")
 
 
@@ -191,10 +206,10 @@ def get_prediction() -> Optional[Dict]:
             'change_pct': float(change_pct),
             'signal': signal,
             'confidence_score': float(confidence_score),
-            'rsi': float(rsi),
-            'macd': float(macd),
-            'ema_200': float(ema_200),
-            'trend': 'Up' if current_price > ema_200 else 'Down',
+            'rsi': float(latest_rsi),
+            'macd': float(latest_macd),
+            'ema_200': float(latest_ema_200),
+            'trend': 'Up' if current_price > latest_ema_200 else 'Down',
             'candles_count': len(df_clean),
             'insight_message': insight_message,
             'insight_reasons': insight_reasons,
@@ -920,3 +935,4 @@ if __name__ == '__main__':
     logger.info("=" * 70)
     
     app.run(debug=True, host='0.0.0.0', port=5000)
+    
